@@ -2,6 +2,7 @@
 
 getMe alone is NOT sufficient evidence that a bot processes Telegram updates.
 """
+from contextlib import closing
 import os
 from pathlib import Path
 import sqlite3
@@ -22,12 +23,13 @@ def check() -> bool:
         if not (0 <= now - stamp <= max_age):
             return False
     try:
-        with sqlite3.connect(database, timeout=3) as db:
-            db.execute("PRAGMA busy_timeout=3000")
-            db.execute("CREATE TABLE IF NOT EXISTS health_probe(id INTEGER PRIMARY KEY, touched INTEGER)")
-            db.execute("INSERT OR REPLACE INTO health_probe(id,touched) VALUES (1, ?)",
-                       (int(now),))
-            db.commit()
+        # Connection context manager only commits/rolls back; it does not close.
+        with closing(sqlite3.connect(database, timeout=3)) as db:
+            with db:
+                db.execute("PRAGMA busy_timeout=3000")
+                db.execute("CREATE TABLE IF NOT EXISTS health_probe(id INTEGER PRIMARY KEY, touched INTEGER)")
+                db.execute("INSERT OR REPLACE INTO health_probe(id,touched) VALUES (1, ?)",
+                           (int(now),))
         return True
     except sqlite3.Error:
         return False
