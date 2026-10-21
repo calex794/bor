@@ -1,24 +1,39 @@
-"""Docker health probe: validate Bot API connectivity without logging secrets."""
+"""Check SQLite writable and fresh successful polling/sweep signals.
 
-import asyncio
+getMe alone is NOT sufficient evidence that a bot processes Telegram updates.
+"""
+from contextlib import closing
 import os
+from pathlib import Path
+import sqlite3
+import time
 
-from aiogram import Bot
 
-
-async def check() -> bool:
-    token = os.getenv("BOT_TOKEN", "")
-    if not token or token == "replace-with-private-token":
+def check() -> bool:
+    database = Path(os.getenv("BOR_DATABASE_PATH", "/data/bor.sqlite3"))
+    root = database.parent
+    if not database.is_file():
         return False
-    bot = Bot(token=token)
+    now = time.time()
+    for name, max_age in (("polling", 135), ("sweep", 40)):
+        try:
+            stamp = int((root / f".bor-{name}").read_text(encoding="ascii"))
+        except (OSError, ValueError):
+            return False
+        if not (0 <= now - stamp <= max_age):
+            return False
     try:
-        await asyncio.wait_for(bot.get_me(), timeout=8)
+        # Connection context manager only commits/rolls back; it does not close.
+        with closing(sqlite3.connect(database, timeout=3)) as db:
+            with db:
+                db.execute("PRAGMA busy_timeout=3000")
+                db.execute("CREATE TABLE IF NOT EXISTS health_probe(id INTEGER PRIMARY KEY, touched INTEGER)")
+                db.execute("INSERT OR REPLACE INTO health_probe(id,touched) VALUES (1, ?)",
+                           (int(now),))
         return True
-    except Exception:
+    except sqlite3.Error:
         return False
-    finally:
-        await bot.session.close()
 
 
 if __name__ == "__main__":
-    raise SystemExit(0 if asyncio.run(check()) else 1)
+    raise SystemExit(0 if check() else 1)

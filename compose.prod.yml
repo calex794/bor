@@ -8,6 +8,9 @@ services:
       BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in server-only /srv/bor/.env}
       BOR_BUILD_SHA: ${BOR_BUILD_SHA:?Set BOR_BUILD_SHA}
       BOR_CATALOG_PATH: /app/catalog.json
+      BOR_DATABASE_PATH: /data/bor.sqlite3
+      BOR_CAPTCHA_SECONDS: ${BOR_CAPTCHA_SECONDS:-120}
+      BOR_CAPTCHA_ATTEMPTS: ${BOR_CAPTCHA_ATTEMPTS:-3}
     volumes:
       - bor_data:/data
     read_only: true
