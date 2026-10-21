@@ -1,0 +1,99 @@
+name: Test, build and deploy BOR
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bor-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Python tests and Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install
+        run: python -m pip install -r requirements.txt
+      - name: Test
+        run: |
+          python -m compileall -q bor
+          python -m unittest discover -s tests -v
+          python -m pip check
+      - name: Build Docker image
+        run: docker build --pull --tag "bor-bot:${GITHUB_SHA}" .
+      - name: Save tested image for deployment
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: docker save "bor-bot:${GITHUB_SHA}" | gzip -1 > bor-image.tar.gz
+      - name: Upload tested image
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bor-tested-image
+          path: bor-image.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  deploy:
+    name: Deploy to Docker host
+    needs: verify
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || vars.BOR_DEPLOY_ENABLED == 'true')
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bor-tested-image
+          path: .
+      - name: Check deployment credentials
+        env:
+          HOST: ${{ secrets.BOR_DEPLOY_HOST }}
+          USER: ${{ secrets.BOR_DEPLOY_USER }}
+          KEY: ${{ secrets.BOR_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.BOR_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          test -n "$HOST" && test -n "$USER" && test -n "$KEY" && test -n "$KNOWN_HOSTS" || {
+            echo 'Missing one or more BOR_DEPLOY_* secrets' >&2
+            exit 1
+          }
+      - name: Configure verified SSH host key
+        env:
+          DEPLOY_KEY: ${{ secrets.BOR_DEPLOY_SSH_KEY }}
+          KNOWN_HOSTS: ${{ secrets.BOR_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Upload and activate release
+        env:
+          DEPLOY_HOST: ${{ secrets.BOR_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.BOR_DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          destination="${DEPLOY_USER}@${DEPLOY_HOST}"
+          remote_dir="/srv/bor/releases/${GITHUB_SHA}"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$destination" "mkdir -p '$remote_dir'"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            bor-image.tar.gz compose.prod.yml scripts/deploy-remote.sh \
+            "$destination:$remote_dir/"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "$destination" \
+            "bash '$remote_dir/deploy-remote.sh' '${GITHUB_SHA}'"

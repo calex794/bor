@@ -1,0 +1,29 @@
+services:
+  bot:
+    image: ${BOR_IMAGE:?Set BOR_IMAGE to the tested git release tag}
+    container_name: bor-bot
+    init: true
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in server-only /srv/bor/.env}
+      BOR_BUILD_SHA: ${BOR_BUILD_SHA:?Set BOR_BUILD_SHA}
+      BOR_CATALOG_PATH: /app/catalog.json
+    volumes:
+      - bor_data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-m", "bor.health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+volumes:
+  bor_data:
+    name: bor_data

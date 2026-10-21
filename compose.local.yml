@@ -1,0 +1,21 @@
+name: bor-local
+services:
+  bot:
+    build: .
+    init: true
+    restart: unless-stopped
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in private .env}
+      BOR_BUILD_SHA: ${BOR_BUILD_SHA:-local}
+      BOR_CATALOG_PATH: /app/catalog.json
+    volumes:
+      - bor_local_data:/data
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "python", "-m", "bor.health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+volumes:
+  bor_local_data:
