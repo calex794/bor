@@ -78,3 +78,42 @@ class HealthTests(unittest.TestCase):
                 self.assertTrue(check())
                 (Path(tmp) / ".bor-polling").write_text(str(int(time.time())-500))
                 self.assertFalse(check())
+
+    def test_health_closes_connection(self):
+        from unittest.mock import patch
+        import sqlite3
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bot.sqlite3"
+            with GuardStore(path):
+                pass
+            stamp = str(int(time.time()))
+            (Path(tmp) / ".bor-polling").write_text(stamp)
+            (Path(tmp) / ".bor-sweep").write_text(stamp)
+            real_connect = sqlite3.connect
+            seen = []
+
+            class TrackedConnection:
+                def __init__(self, wrapped):
+                    self.wrapped = wrapped
+                    self.closed = False
+                def __enter__(self):
+                    self.wrapped.__enter__()
+                    return self
+                def __exit__(self, *exc):
+                    return self.wrapped.__exit__(*exc)
+                def execute(self, *args, **kwargs):
+                    return self.wrapped.execute(*args, **kwargs)
+                def close(self):
+                    self.closed = True
+                    self.wrapped.close()
+
+            def connect(*args, **kwargs):
+                instance = TrackedConnection(real_connect(*args, **kwargs))
+                seen.append(instance)
+                return instance
+
+            with patch.dict("os.environ", {"BOR_DATABASE_PATH": str(path)}):
+                with patch("bor.health.sqlite3.connect", side_effect=connect):
+                    self.assertTrue(check())
+            self.assertEqual(len(seen), 1)
+            self.assertTrue(seen[0].closed)
