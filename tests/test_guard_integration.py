@@ -94,6 +94,41 @@ class GuardIntegrationTests(IsolatedAsyncioTestCase):
         self.assertEqual(self.store.get(r.chat_id,r.user_id).status, "passed")
         self.bot.ban_chat_member.assert_not_called()
 
+    async def test_explicit_admin_deny_can_kick_member(self):
+        self.store.enable(self.chat.id, True)
+        await self.guard.on_member(self.member_event(), self.bot)
+        r = self.store.get(self.chat.id, 12345)
+        self.bot.get_chat_member.return_value = NS(status="member")
+        self.assertTrue(self.store.reserve_action(r, "kick"))
+        await self.guard.execute(r, "kick", self.bot, explicitly_denied=True)
+        self.bot.ban_chat_member.assert_awaited_once()
+        self.assertEqual(self.store.get(r.chat_id, r.user_id).status, "denied")
+
+    async def test_join_request_correct_approval(self):
+        self.store.enable(self.chat.id, True)
+        event = NS(chat=self.chat, from_user=NS(id=12345, is_bot=False),
+                   date=datetime.fromtimestamp(self.now, tz=timezone.utc), user_chat_id=999888)
+        await self.guard.on_request(event, self.bot)
+        r = self.store.get(self.chat.id, 12345)
+        self.bot.get_chat_member.return_value = NS(status="left")
+        callback = NS(data=f"g1:{r.chat_id}:{r.nonce}:{r.answer}", id="join-success",
+                      from_user=NS(id=r.user_id), message=NS(chat=NS(id=999888)),
+                      answer=AsyncMock())
+        await self.guard.on_callback(callback, self.bot)
+        self.bot.approve_chat_join_request.assert_awaited_once()
+        self.assertEqual(self.store.get(r.chat_id, r.user_id).status, "passed")
+
+    async def test_join_request_timeout_declines(self):
+        self.store.enable(self.chat.id, True)
+        event = NS(chat=self.chat, from_user=NS(id=12345, is_bot=False),
+                   date=datetime.fromtimestamp(self.now, tz=timezone.utc), user_chat_id=999888)
+        await self.guard.on_request(event, self.bot)
+        r = self.store.get(self.chat.id, 12345)
+        self.bot.get_chat_member.return_value = NS(status="left")
+        await self.guard.expire(r, self.bot)
+        self.bot.decline_chat_join_request.assert_awaited_once()
+        self.assertEqual(self.store.get(r.chat_id, r.user_id).status, "denied")
+
     async def test_uncertain_restrict_does_not_issue_captcha(self):
         self.store.enable(self.chat.id, True)
         self.bot.restrict_chat_member.side_effect = TimeoutError("unknown outcome")
