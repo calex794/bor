@@ -27,7 +27,7 @@ async def main() -> None:
         if not getattr(member, "can_restrict_members", False):
             errors.append("Missing right to restrict members")
         if not getattr(member, "can_invite_users", False):
-            errors.append("Missing right to approve join requests")
+            print("NOTE: Missing join-request approval rights; direct-entry CAPTCHA still possible")
         if not getattr(member, "can_delete_messages", False):
             print("NOTE: No delete-messages right; first anti-bot version does not need it")
         print(f"Bot: @{me.username or 'no-username'}, chat type: {chat.type}")
