@@ -204,8 +204,9 @@ class Guard:
             caption = "Нужна проверка администратором"
         await query.answer(caption, show_alert=decision.kind in ("invalid", "stale"))
 
-    async def execute(self, record: Challenge, action: str, bot: Bot) -> None:
-        """Perform a previously reserved action; don't retry uncertain effects."""
+    async def execute(self, record: Challenge, action: str, bot: Bot,
+                      *, explicitly_denied: bool = False) -> None:
+        """Perform a reserved action; only an explicit admin denial can kick released members."""
         if self.store.get(record.chat_id, record.user_id).status != "acting":
             return
         try:
@@ -223,7 +224,7 @@ class Guard:
             if action in ("unrestrict", "kick") and not _present(current):
                 self.store.finalize(record, "closed")
                 return
-            if action in ("unrestrict", "kick") and getattr(current, "status", None) == "member":
+            if action in ("unrestrict", "kick") and getattr(current, "status", None) == "member" and not (action == "kick" and explicitly_denied):
                 # Someone with admin rights has already released this user.
                 # Do not kick them after a timeout or reapply restrictions.
                 self.store.finalize(record, "passed")
@@ -367,7 +368,7 @@ class Guard:
         action = (("unrestrict" if allow else "kick") if record.flow == "member"
                   else ("approve" if allow else "decline"))
         if self.store.reserve_action(record, action):
-            await self.execute(record, action, bot)
+            await self.execute(record, action, bot, explicitly_denied=not allow)
         final = self.store.get(record.chat_id, record.user_id)
         if final and final.status == "manual":
             await message.answer("Telegram не подтвердил действие, нужна ручная проверка.")
