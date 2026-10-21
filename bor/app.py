@@ -12,6 +12,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from .catalog import Book, load_books
 from .deeplink import route_start, valid_book_id
 from .guard import Guard
+from .runtime import MonitoredBot
 from .guard_store import GuardStore
 from .instance_lock import exclusive_database
 
@@ -85,7 +86,10 @@ async def main() -> None:
     database = Path(os.getenv("BOR_DATABASE_PATH", "./data/bor.sqlite3"))
     books = load_books(Path(os.getenv("BOR_CATALOG_PATH", "catalog.json")))
     build_sha = os.getenv("BOR_BUILD_SHA", "local")
-    bot = Bot(token=token)
+    pulse_dir = database.parent
+    for kind in ("polling", "sweep"):
+        (pulse_dir / f".bor-{kind}").unlink(missing_ok=True)
+    bot = MonitoredBot(token=token, pulse_dir=pulse_dir)
     try:
         with exclusive_database(database):
             store = GuardStore(database)

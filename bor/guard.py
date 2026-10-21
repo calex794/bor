@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 from .guard_store import Challenge, GuardStore
+from .runtime import beat
 from .access import can_moderate
 
 LOG = logging.getLogger("bor.guard")
@@ -294,6 +295,7 @@ class Guard:
             for record in self.store.due():
                 await self.expire(record, bot)
             self.store.cleanup(int(time.time()) - 7 * 86400)
+            beat(self.store.db.execute("PRAGMA database_list").fetchone()["file"].rsplit("/", 1)[0], "sweep")
 
     async def sweep_forever(self, bot: Bot) -> None:
         while True:
