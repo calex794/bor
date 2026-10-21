@@ -61,7 +61,10 @@ echo "New release failed health checks: $sha" >&2
 if [[ "$previous" =~ ^[a-f0-9]{40}$ && "$previous" != "$sha" ]] \
    && test -f "$root/releases/$previous/compose.prod.yml"; then
   echo "Restoring previous release: $previous" >&2
-  if run_release "$previous" && wait_ready; then
+  # Reload the saved image: the local Docker cache may have been pruned.
+  if test -r "$root/releases/$previous/bor-image.tar.gz" \
+    && gzip -dc "$root/releases/$previous/bor-image.tar.gz" | docker load > /dev/null \
+    && run_release "$previous" && wait_ready; then
     echo "Previous release restored: $previous" >&2
   else
     echo 'Rollback could not be confirmed healthy; intervention required' >&2
