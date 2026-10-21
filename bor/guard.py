@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime
 import logging
 import time
+from pathlib import Path
 
 from aiogram import Bot, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -295,7 +296,7 @@ class Guard:
             for record in self.store.due():
                 await self.expire(record, bot)
             self.store.cleanup(int(time.time()) - 7 * 86400)
-            beat(self.store.db.execute("PRAGMA database_list").fetchone()["file"].rsplit("/", 1)[0], "sweep")
+            beat(Path(self.store.db.execute("PRAGMA database_list").fetchone()["file"]).parent, "sweep")
 
     async def sweep_forever(self, bot: Bot) -> None:
         while True:
