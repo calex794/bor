@@ -5,9 +5,12 @@ services:
     init: true
     restart: unless-stopped
     environment:
-      BOT_TOKEN: ${BOT_TOKEN:?Set BOT_TOKEN in private .env}
-      BOR_BUILD_SHA: ${BOR_BUILD_SHA:-local}
+      BOT_TOKEN: \${BOT_TOKEN:?Set BOT_TOKEN in private .env}
+      BOR_BUILD_SHA: \${BOR_BUILD_SHA:-local}
       BOR_CATALOG_PATH: /app/catalog.json
+      BOR_DATABASE_PATH: /data/bor.sqlite3
+      BOR_CAPTCHA_SECONDS: \${BOR_CAPTCHA_SECONDS:-120}
+      BOR_CAPTCHA_ATTEMPTS: \${BOR_CAPTCHA_ATTEMPTS:-3}
     volumes:
       - bor_local_data:/data
     stop_grace_period: 45s

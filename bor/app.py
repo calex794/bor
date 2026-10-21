@@ -1,4 +1,4 @@
-"""First running version of Rebuild: commands, book cards, and deep links."""
+"""BOR entry point: anti-bot first, optional demo book/navigation commands."""
 
 import asyncio
 import logging
@@ -11,11 +11,15 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .catalog import Book, load_books
 from .deeplink import route_start, valid_book_id
+from .guard import Guard
+from .guard_store import GuardStore
+from .instance_lock import exclusive_database
 
 LOGGER = logging.getLogger("bor")
 
 
 def create_router(books: dict[str, Book], build_sha: str) -> Router:
+    """Optional reader commands. These do not run moderation or change chat rights."""
     router = Router()
 
     async def send_book(message: Message, book_id: str) -> None:
@@ -28,10 +32,8 @@ def create_router(books: dict[str, Book], build_sha: str) -> Router:
                 InlineKeyboardButton(text="Открыть источник", url=book.url)
             ]]) if book.url else None
         )
-        # Plain text by design: book titles/descriptions cannot inject HTML/Markdown.
         await message.answer(
-            f"{book.title}\n\n{book.description}".strip(),
-            reply_markup=buttons,
+            f"{book.title}\n\n{book.description}".strip(), reply_markup=buttons,
         )
 
     @router.message(CommandStart())
@@ -40,19 +42,25 @@ def create_router(books: dict[str, Book], build_sha: str) -> Router:
         if route.kind == "book":
             await send_book(message, route.identifier)
         elif route.kind == "help":
-            await message.answer("Команды: /start, /help, /version, /book demo")
+            await message.answer("Антибот: /guard on, /guard off, /status, /pending, /allow ID, /deny ID")
         elif route.kind == "invalid":
             await message.answer("Ссылка устарела или содержит неверный параметр.")
         else:
             await message.answer(
-                "Бот Ребилд запущен.\n"
-                "Команды: /help, /version, /book demo.\n"
-                "Адресная ссылка на книгу: ?start=book_demo"
+                "Бот Ребилд — защита Telegram-группы.\n"
+                "Добавьте бота администратором тестовой супергруппы, затем /guard on.\n"
+                "Команды администратора: /status, /pending, /allow ID, /deny ID."
             )
 
     @router.message(Command("help"))
     async def help_command(message: Message) -> None:
-        await message.answer("/start — главное меню\n/help — команды\n/version — версия\n/book demo — пример карточки")
+        await message.answer(
+            "/guard on — включить проверку новых участников в супергруппе\n"
+            "/guard off — остановить новые проверки\n"
+            "/status — состояние\n/pending — незавершённые проверки\n"
+            "/allow ID — пропустить пользователя\n/deny ID — отклонить\n"
+            "/version — версия бота"
+        )
 
     @router.message(Command("version"))
     async def version(message: Message) -> None:
@@ -73,20 +81,37 @@ async def main() -> None:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     token = os.getenv("BOT_TOKEN", "").strip()
     if not token or token == "replace-with-private-token":
-        raise RuntimeError("BOT_TOKEN is missing. Set it in the private .env file.")
+        raise RuntimeError("BOT_TOKEN is missing. Set it in a private .env file.")
+    database = Path(os.getenv("BOR_DATABASE_PATH", "./data/bor.sqlite3"))
     books = load_books(Path(os.getenv("BOR_CATALOG_PATH", "catalog.json")))
     build_sha = os.getenv("BOR_BUILD_SHA", "local")
     bot = Bot(token=token)
     try:
-        # Don't silently remove a webhook owned by another bot deployment.
-        hook = await bot.get_webhook_info()
-        if hook.url:
-            raise RuntimeError("A Telegram webhook is configured; disable it manually before polling")
-        me = await bot.get_me()
-        LOGGER.info("Starting @%s, release=%s", me.username, build_sha[:12])
-        dp = Dispatcher()
-        dp.include_router(create_router(books, build_sha))
-        await dp.start_polling(bot, close_bot_session=False)
+        with exclusive_database(database):
+            store = GuardStore(database)
+            try:
+                hook = await bot.get_webhook_info()
+                if hook.url:
+                    raise RuntimeError("Telegram webhook exists; stop it manually before long polling")
+                me = await bot.get_me()
+                LOGGER.info("Starting @%s, release=%s", me.username, build_sha[:12])
+                guard = Guard(store, me.id,
+                              seconds=int(os.getenv("BOR_CAPTCHA_SECONDS", "120")),
+                              max_attempts=int(os.getenv("BOR_CAPTCHA_ATTEMPTS", "3")))
+                dp = Dispatcher()
+                dp.include_router(guard.router())
+                dp.include_router(create_router(books, build_sha))
+                await guard.sweep(bot)
+                sweeper = asyncio.create_task(guard.sweep_forever(bot))
+                try:
+                    await dp.start_polling(bot, close_bot_session=False, handle_as_tasks=False,
+                                           allowed_updates=["message", "callback_query", "chat_member",
+                                                            "chat_join_request"])
+                finally:
+                    sweeper.cancel()
+                    await asyncio.gather(sweeper, return_exceptions=True)
+            finally:
+                store.close()
     finally:
         await bot.session.close()
 
