@@ -70,6 +70,18 @@ class GuardStore:
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (chat_id, user_id)
             );
+            CREATE TABLE IF NOT EXISTS audit_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                user_id INTEGER,
+                actor_id INTEGER,
+                event TEXT NOT NULL,
+                action TEXT,
+                nonce TEXT,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS audit_lookup
+                ON audit_actions(chat_id, user_id, id DESC);
             CREATE TABLE IF NOT EXISTS processed_callbacks (
                 callback_id TEXT PRIMARY KEY,
                 created_at INTEGER NOT NULL
@@ -89,10 +101,28 @@ class GuardStore:
         row = self.db.execute("SELECT enabled FROM guard_settings WHERE chat_id=?", (chat_id,)).fetchone()
         return bool(row and row["enabled"])
 
-    def enable(self, chat_id: int, enabled: bool) -> None:
+    def log_action(self, chat_id: int, user_id: int | None, actor_id: int | None,
+                   event: str, action: str | None = None, nonce: str | None = None,
+                   now: int | None = None) -> None:
+        self.db.execute(
+            "INSERT INTO audit_actions(chat_id,user_id,actor_id,event,action,nonce,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (chat_id,user_id,actor_id,event,action,nonce,
+             int(time.time()) if now is None else now),
+        )
+
+    def audit_history(self, chat_id: int, user_id: int, limit: int = 10):
+        return self.db.execute(
+            "SELECT * FROM audit_actions WHERE chat_id=? AND user_id=? ORDER BY id DESC LIMIT ?",
+            (chat_id,user_id,max(1,min(limit,30))),
+        ).fetchall()
+
+    def enable(self, chat_id: int, enabled: bool, actor_id: int | None = None) -> None:
         self.db.execute("INSERT INTO guard_settings(chat_id,enabled) VALUES(?,?) "
                         "ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled",
                         (chat_id, int(enabled)))
+        if actor_id is not None:
+            self.log_action(chat_id, None, actor_id, "guard_enabled" if enabled else "guard_disabled")
 
     @staticmethod
     def _from_row(row: sqlite3.Row | None) -> Challenge | None:
@@ -165,6 +195,8 @@ class GuardStore:
             UPDATE challenges SET status='manual',action=?,updated_at=?
             WHERE chat_id=? AND user_id=? AND nonce=?
         """, (reason[:120],now,challenge.chat_id,challenge.user_id,challenge.nonce))
+        self.log_action(challenge.chat_id,challenge.user_id,None,"manual_review",
+                        reason[:120],challenge.nonce,now)
 
     def finalize(self, challenge: Challenge, outcome: str, now: int | None = None) -> bool:
         if outcome not in ("passed", "denied", "closed"):
@@ -174,9 +206,13 @@ class GuardStore:
             UPDATE challenges SET status=?,action=NULL,updated_at=?
             WHERE chat_id=? AND user_id=? AND nonce=? AND status='acting'
         """, (outcome,now,challenge.chat_id,challenge.user_id,challenge.nonce))
+        if cur.rowcount:
+            self.log_action(challenge.chat_id,challenge.user_id,None,"telegram_confirmed",
+                            outcome,challenge.nonce,now)
         return cur.rowcount == 1
 
-    def reserve_action(self, challenge: Challenge, action: str, now: int | None = None) -> bool:
+    def reserve_action(self, challenge: Challenge, action: str, now: int | None = None,
+                       actor_id: int | None = None, source: str = "system") -> bool:
         if action not in ("unrestrict", "approve", "kick", "decline"):
             raise ValueError("Invalid action")
         now = int(time.time()) if now is None else now
@@ -184,6 +220,9 @@ class GuardStore:
             UPDATE challenges SET status='acting',action=?,updated_at=?
             WHERE chat_id=? AND user_id=? AND nonce=? AND status IN ('pending','manual')
         """, (action,now,challenge.chat_id,challenge.user_id,challenge.nonce))
+        if cur.rowcount:
+            self.log_action(challenge.chat_id,challenge.user_id,actor_id,
+                            "reserved_"+source,action,challenge.nonce,now)
         return cur.rowcount == 1
 
     def answer(self, chat_id: int, user_id: int, nonce: str, value: int,
