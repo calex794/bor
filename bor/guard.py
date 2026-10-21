@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 
 from .guard_store import Challenge, GuardStore
+from .access import can_moderate
 
 LOG = logging.getLogger("bor.guard")
 
@@ -98,6 +99,11 @@ class Guard:
         async def deny_command(message: Message, command: CommandObject, bot: Bot) -> None:
             async with self.lock:
                 await self.on_override(message, command, bot, allow=False)
+
+        @router.message(Command("audit"))
+        async def audit_command(message: Message, command: CommandObject, bot: Bot) -> None:
+            async with self.lock:
+                await self.on_audit(message, command, bot)
 
         return router
 
@@ -313,23 +319,34 @@ class Guard:
             return False
         return True
 
-    async def on_guard(self, message: Message, command: CommandObject, bot: Bot) -> None:
+    async def may_moderate(self, message: Message, bot: Bot, flow: str,
+                           *, check_bot: bool = True) -> bool:
         if not await self.is_admin(message, bot):
-            return
+            return False
+        try:
+            actor = await bot.get_chat_member(message.chat.id, message.from_user.id)
+            if not can_moderate(actor, flow):
+                await message.answer("Недостаточно ваших прав для этого действия.")
+                return False
+            if check_bot:
+                current_bot = await bot.get_chat_member(message.chat.id, self.bot_id)
+                if not can_moderate(current_bot, flow):
+                    await message.answer("Боту не выданы нужные права в этой группе.")
+                    return False
+            return True
+        except Exception:
+            await message.answer("Не удалось проверить права. Действие отменено.")
+            return False
+
+    async def on_guard(self, message: Message, command: CommandObject, bot: Bot) -> None:
         mode = (command.args or "").strip().lower()
         if mode not in ("on", "off"):
-            await message.answer("Используйте: /guard on или /guard off")
+            if await self.is_admin(message, bot):
+                await message.answer("Используйте: /guard on или /guard off")
             return
-        if mode == "on":
-            try:
-                member = await bot.get_chat_member(message.chat.id, self.bot_id)
-                if not (_admin(member) and getattr(member, "can_restrict_members", False)):
-                    await message.answer("Боту нужно право ограничивать участников.")
-                    return
-            except Exception:
-                await message.answer("Не удалось проверить права бота.")
-                return
-        self.store.enable(message.chat.id, mode == "on")
+        if not await self.may_moderate(message, bot, "member", check_bot=mode == "on"):
+            return
+        self.store.enable(message.chat.id, mode == "on", actor_id=message.from_user.id)
         await message.answer("Антибот включён." if mode == "on" else
                              "Антибот отключён для новых вступлений. Текущие проверки остаются.")
 
@@ -365,12 +382,34 @@ class Guard:
         if not record or record.status not in ("pending", "manual"):
             await message.answer("Нет проверки с таким ID, доступной для ручного решения.")
             return
+        if not await self.may_moderate(message, bot, record.flow):
+            return
         action = (("unrestrict" if allow else "kick") if record.flow == "member"
                   else ("approve" if allow else "decline"))
-        if self.store.reserve_action(record, action):
+        if self.store.reserve_action(record, action, actor_id=message.from_user.id,
+                                     source="administrator"):
             await self.execute(record, action, bot, explicitly_denied=not allow)
         final = self.store.get(record.chat_id, record.user_id)
         if final and final.status == "manual":
             await message.answer("Telegram не подтвердил действие, нужна ручная проверка.")
         else:
             await message.answer(f"Результат: {final.status if final else 'неизвестно'}")
+
+    async def on_audit(self, message: Message, command: CommandObject, bot: Bot) -> None:
+        if not await self.is_admin(message, bot):
+            return
+        raw = (command.args or "").strip()
+        if not raw.isdecimal():
+            await message.answer("Укажите ID участника: /audit ID")
+            return
+        entries = self.store.audit_history(message.chat.id, int(raw), limit=10)
+        if not entries:
+            await message.answer("Событий для этого участника не найдено.")
+            return
+        from datetime import datetime, timezone
+        lines = ["Последние решения (UTC):"]
+        for entry in entries:
+            stamp = datetime.fromtimestamp(entry["created_at"], timezone.utc).strftime("%m-%d %H:%M")
+            actor = entry["actor_id"] if entry["actor_id"] is not None else "система"
+            lines.append(f'{stamp} | {entry["event"]} | {entry["action"] or "-"} | {actor}')
+        await message.answer("\n".join(lines))
